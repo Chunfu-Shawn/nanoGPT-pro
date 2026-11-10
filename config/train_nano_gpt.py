@@ -1,8 +1,9 @@
 # Small TinyStories pretraining run on CPU.
-out_dir = "out-tinystories"
+out_dir = "out"
 eval_interval = 100
 eval_iters = 10
 log_interval = 10
+tensorboard_log = True
 always_save_checkpoint = True
 
 dataset = "tinystories"
@@ -10,8 +11,8 @@ gradient_accumulation_steps = 1
 batch_size = 2
 block_size = 128
 
-n_layer = 2
-n_head = 2
+n_layer = 6
+n_head = 4
 n_embd = 128
 dropout = 0.1
 rope_max_seq_len = 512

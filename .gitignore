@@ -5,5 +5,5 @@ log/
 out/
 
 # data
-*train.bin
-*val.bin
+data/**/*train.bin
+data/**/*val.bin

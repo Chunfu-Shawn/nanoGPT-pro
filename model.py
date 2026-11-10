@@ -197,7 +197,7 @@ class GPT(nn.Module):
     def context_limit(self):
         return self.config.rope_max_seq_len or self.config.block_size
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, *, last_token_only=False):
         t = idx.size(1)
         if t > self.context_limit:
             raise ValueError(
@@ -214,16 +214,9 @@ class GPT(nn.Module):
             x = decoder_layer(x, rope=self.rope)
         x = self.transformer.ln_f(x)
 
-        if targets is not None:
-            # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
-        else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
-            loss = None
-
-        return logits, loss
+        if last_token_only:
+            x = x[:, [-1], :]
+        return self.lm_head(x)
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
@@ -351,7 +344,7 @@ class GPT(nn.Module):
             idx_cond = idx[:, -self.context_limit:]
             # idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits = self(idx_cond, last_token_only=True)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options

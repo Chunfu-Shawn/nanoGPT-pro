@@ -32,21 +32,17 @@ def main():
     if min(args.train_tokens, args.val_tokens) <= 0:
         parser.error("token targets must be positive")
 
-    output_dir = Path(__file__).resolve().with_name("tinystories")
-    if output_dir.exists():
-        parser.error(f"{output_dir} already exists. Move it before preparing a new sample.")
+    output_dir = Path(__file__).resolve().parent
+    if (output_dir / "train.bin").exists():
+        parser.error(f"Datasets in {output_dir} already exist. Move it before preparing a new sample.")
 
     encoder = tiktoken.get_encoding("gpt2")
     dataset = load_dataset("roneneldan/TinyStories", streaming=True)
     train = dataset["train"].shuffle(seed=42, buffer_size=2048)
     val = dataset["validation"]
-
-    with TemporaryDirectory(dir=output_dir.parent) as temporary_dir:
-        prepared = Path(temporary_dir) / "tinystories"
-        prepared.mkdir()
-        train_count = write_tokens(train, encoder, prepared / "train.bin", args.train_tokens)
-        val_count = write_tokens(val, encoder, prepared / "val.bin", args.val_tokens)
-        prepared.rename(output_dir)
+    
+    train_count = write_tokens(train, encoder, output_dir / "train.bin", args.train_tokens)
+    val_count = write_tokens(val, encoder, output_dir / "val.bin", args.val_tokens)
 
     print(f"train.bin: {train_count:,} tokens")
     print(f"val.bin:   {val_count:,} tokens")

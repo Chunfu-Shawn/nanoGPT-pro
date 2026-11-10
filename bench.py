@@ -6,6 +6,7 @@ from contextlib import nullcontext
 import numpy as np
 import time
 import torch
+from torch.nn import functional as F
 from model import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
@@ -83,7 +84,8 @@ if profile:
         X, Y = get_batch('train')
         for k in range(num_steps):
             with ctx:
-                logits, loss = model(X, Y)
+                logits = model(X)
+                loss = F.cross_entropy(logits.flatten(0, 1), Y.reshape(-1), ignore_index=-1)
             X, Y = get_batch('train')
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -102,7 +104,8 @@ else:
         X, Y = get_batch('train')
         for k in range(num_steps):
             with ctx:
-                logits, loss = model(X, Y)
+                logits = model(X)
+                loss = F.cross_entropy(logits.flatten(0, 1), Y.reshape(-1), ignore_index=-1)
             X, Y = get_batch('train')
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
