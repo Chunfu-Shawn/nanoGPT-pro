@@ -1,0 +1,160 @@
+Overriding config with config/train_nano_gpt.py:
+# Small TinyStories pretraining run on CPU.
+out_dir = "out-tinystories"
+eval_interval = 100
+eval_iters = 10
+log_interval = 10
+always_save_checkpoint = True
+
+dataset = "tinystories"
+gradient_accumulation_steps = 1
+batch_size = 2
+block_size = 128
+
+n_layer = 2
+n_head = 2
+n_embd = 128
+dropout = 0.1
+rope_max_seq_len = 512
+rope_alpha = 1.0
+
+learning_rate = 1e-3
+max_iters = 1000
+lr_decay_iters = 1000
+min_lr = 1e-4
+beta2 = 0.99
+warmup_iters = 25
+
+device = "cpu"
+dtype = "float32"
+compile = False
+
+tokens per iteration will be: 256
+Initializing a new model from scratch
+defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)
+number of parameters: 6.83M
+num decayed parameter tensors: 9, with 6,832,128 parameters
+num non-decayed parameter tensors: 5, with 640 parameters
+using fused AdamW: False
+step 0: train loss 10.8451, val loss 10.8570
+iter 0: loss 10.8435, time 657.20ms, mfu -100.00%
+iter 10: loss 10.3775, time 75.50ms, mfu 0.04%
+iter 20: loss 9.5552, time 87.73ms, mfu 0.04%
+iter 30: loss 8.2373, time 81.40ms, mfu 0.04%
+iter 40: loss 6.6358, time 90.44ms, mfu 0.04%
+iter 50: loss 6.3683, time 104.11ms, mfu 0.04%
+iter 60: loss 6.4023, time 95.14ms, mfu 0.04%
+iter 70: loss 5.6550, time 82.58ms, mfu 0.04%
+iter 80: loss 5.8163, time 71.48ms, mfu 0.04%
+iter 90: loss 5.7711, time 74.23ms, mfu 0.04%
+step 100: train loss 5.6737, val loss 5.4626
+saving checkpoint to out-tinystories
+iter 100: loss 5.8203, time 614.64ms, mfu 0.04%
+iter 110: loss 5.5942, time 74.33ms, mfu 0.04%
+iter 120: loss 5.6061, time 72.48ms, mfu 0.04%
+iter 130: loss 5.3611, time 70.76ms, mfu 0.04%
+iter 140: loss 5.5693, time 75.35ms, mfu 0.04%
+iter 150: loss 5.3531, time 74.81ms, mfu 0.04%
+iter 160: loss 4.9065, time 70.18ms, mfu 0.04%
+iter 170: loss 5.4876, time 77.51ms, mfu 0.04%
+iter 180: loss 5.3950, time 77.28ms, mfu 0.04%
+iter 190: loss 5.8111, time 69.90ms, mfu 0.04%
+step 200: train loss 4.8108, val loss 4.6881
+saving checkpoint to out-tinystories
+iter 200: loss 5.4966, time 620.00ms, mfu 0.04%
+iter 210: loss 4.5874, time 75.43ms, mfu 0.04%
+iter 220: loss 5.0236, time 71.96ms, mfu 0.04%
+iter 230: loss 4.8339, time 79.66ms, mfu 0.04%
+iter 240: loss 5.1685, time 79.44ms, mfu 0.04%
+iter 250: loss 4.6684, time 75.49ms, mfu 0.04%
+iter 260: loss 4.8185, time 83.77ms, mfu 0.04%
+iter 270: loss 4.8630, time 78.30ms, mfu 0.04%
+iter 280: loss 5.1584, time 81.63ms, mfu 0.04%
+iter 290: loss 4.9187, time 74.50ms, mfu 0.04%
+step 300: train loss 4.6705, val loss 4.3583
+saving checkpoint to out-tinystories
+iter 300: loss 4.6338, time 701.43ms, mfu 0.04%
+iter 310: loss 4.5699, time 72.67ms, mfu 0.04%
+iter 320: loss 4.7644, time 78.19ms, mfu 0.04%
+iter 330: loss 4.7367, time 70.19ms, mfu 0.04%
+iter 340: loss 4.2283, time 75.70ms, mfu 0.04%
+iter 350: loss 4.5517, time 77.43ms, mfu 0.04%
+iter 360: loss 4.8106, time 71.73ms, mfu 0.04%
+iter 370: loss 4.5217, time 75.17ms, mfu 0.04%
+iter 380: loss 4.3285, time 77.33ms, mfu 0.04%
+iter 390: loss 4.6498, time 72.52ms, mfu 0.04%
+step 400: train loss 4.4896, val loss 4.3599
+saving checkpoint to out-tinystories
+iter 400: loss 4.3431, time 623.78ms, mfu 0.04%
+iter 410: loss 5.0720, time 76.00ms, mfu 0.04%
+iter 420: loss 4.9147, time 72.69ms, mfu 0.04%
+iter 430: loss 4.4904, time 79.02ms, mfu 0.04%
+iter 440: loss 4.0225, time 75.80ms, mfu 0.04%
+iter 450: loss 4.1434, time 78.70ms, mfu 0.04%
+iter 460: loss 4.5183, time 81.88ms, mfu 0.04%
+iter 470: loss 4.3303, time 73.26ms, mfu 0.04%
+iter 480: loss 4.1928, time 180.34ms, mfu 0.04%
+iter 490: loss 4.1934, time 114.05ms, mfu 0.04%
+step 500: train loss 4.2413, val loss 4.1060
+saving checkpoint to out-tinystories
+iter 500: loss 3.9784, time 663.94ms, mfu 0.04%
+iter 510: loss 4.3463, time 165.64ms, mfu 0.03%
+iter 520: loss 4.1934, time 86.87ms, mfu 0.03%
+iter 530: loss 4.2972, time 76.63ms, mfu 0.04%
+iter 540: loss 3.9767, time 74.12ms, mfu 0.04%
+iter 550: loss 4.4859, time 72.97ms, mfu 0.04%
+iter 560: loss 4.7279, time 82.98ms, mfu 0.04%
+iter 570: loss 3.9285, time 71.31ms, mfu 0.04%
+iter 580: loss 4.1445, time 75.14ms, mfu 0.04%
+iter 590: loss 4.2414, time 71.18ms, mfu 0.04%
+step 600: train loss 4.2104, val loss 4.0494
+saving checkpoint to out-tinystories
+iter 600: loss 4.3586, time 603.62ms, mfu 0.04%
+iter 610: loss 3.5026, time 70.77ms, mfu 0.04%
+iter 620: loss 3.6243, time 82.42ms, mfu 0.04%
+iter 630: loss 4.6808, time 74.83ms, mfu 0.04%
+iter 640: loss 4.6952, time 78.46ms, mfu 0.04%
+iter 650: loss 4.5587, time 71.26ms, mfu 0.04%
+iter 660: loss 4.6742, time 71.22ms, mfu 0.04%
+iter 670: loss 3.6913, time 73.07ms, mfu 0.04%
+iter 680: loss 4.0300, time 102.21ms, mfu 0.04%
+iter 690: loss 3.9238, time 89.38ms, mfu 0.04%
+step 700: train loss 4.2079, val loss 4.1560
+saving checkpoint to out-tinystories
+iter 700: loss 4.1686, time 612.07ms, mfu 0.04%
+iter 710: loss 4.4326, time 76.44ms, mfu 0.04%
+iter 720: loss 4.4667, time 81.39ms, mfu 0.04%
+iter 730: loss 4.4781, time 72.23ms, mfu 0.04%
+iter 740: loss 3.9235, time 81.38ms, mfu 0.04%
+iter 750: loss 4.4848, time 76.32ms, mfu 0.04%
+iter 760: loss 4.3139, time 70.28ms, mfu 0.04%
+iter 770: loss 4.3957, time 88.30ms, mfu 0.04%
+iter 780: loss 4.2598, time 71.58ms, mfu 0.04%
+iter 790: loss 3.9190, time 82.98ms, mfu 0.04%
+step 800: train loss 3.9600, val loss 4.0120
+saving checkpoint to out-tinystories
+iter 800: loss 3.5607, time 989.57ms, mfu 0.04%
+iter 810: loss 4.2573, time 112.82ms, mfu 0.04%
+iter 820: loss 4.6277, time 75.39ms, mfu 0.04%
+iter 830: loss 4.3332, time 71.69ms, mfu 0.04%
+iter 840: loss 3.9079, time 92.08ms, mfu 0.04%
+iter 850: loss 3.7181, time 106.13ms, mfu 0.04%
+iter 860: loss 4.0036, time 110.85ms, mfu 0.04%
+iter 870: loss 3.9131, time 73.63ms, mfu 0.04%
+iter 880: loss 3.6092, time 70.51ms, mfu 0.04%
+iter 890: loss 4.6118, time 77.42ms, mfu 0.04%
+step 900: train loss 4.1458, val loss 3.8273
+saving checkpoint to out-tinystories
+iter 900: loss 3.8155, time 708.71ms, mfu 0.04%
+iter 910: loss 3.7658, time 91.82ms, mfu 0.04%
+iter 920: loss 4.1747, time 79.89ms, mfu 0.04%
+iter 930: loss 4.0334, time 76.07ms, mfu 0.04%
+iter 940: loss 4.3706, time 80.55ms, mfu 0.04%
+iter 950: loss 4.0139, time 71.20ms, mfu 0.04%
+iter 960: loss 4.5383, time 77.46ms, mfu 0.04%
+iter 970: loss 3.6129, time 81.50ms, mfu 0.04%
+iter 980: loss 3.8010, time 70.66ms, mfu 0.04%
+iter 990: loss 4.1086, time 70.81ms, mfu 0.04%
+step 1000: train loss 4.1477, val loss 3.7877
+saving checkpoint to out-tinystories
+iter 1000: loss 3.6887, time 617.83ms, mfu 0.04%

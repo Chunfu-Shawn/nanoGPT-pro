@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from positional_embedding import ExtendedRotaryPositionalEmbedding as RoPE
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -49,7 +50,7 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x):
+    def forward(self, x, rope=None):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -58,6 +59,10 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
+        if rope is not None:
+            q = rope(q)
+            k = rope(k)
+
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
@@ -65,7 +70,13 @@ class CausalSelfAttention(nn.Module):
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            # att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            if T <= self.bias.size(-1): # type: ignore
+                mask = self.bias[:, :, :T, :T] != 0
+            else:
+                positions = torch.arange(T, device=x.device)
+                mask = positions[:, None] >= positions[None, :]
+            att = att.masked_fill(~mask, float("-inf"))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -91,7 +102,7 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
 
-class Block(nn.Module):
+class DecoderLayer(nn.Module):
 
     def __init__(self, config):
         super().__init__()
@@ -100,8 +111,8 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, rope=None):
+        x = x + self.attn(self.ln_1(x), rope=rope)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -114,6 +125,8 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    rope_max_seq_len: int = 0
+    rope_alpha: float = 1.0
 
 class GPT(nn.Module):
 
@@ -122,12 +135,24 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
+        self.rope = None
+        if config.rope_max_seq_len:
+            if config.rope_max_seq_len < config.block_size:
+                raise ValueError("rope_max_seq_len must be at least block_size")
+
+            self.rope = RoPE(
+                dim=config.n_embd // config.n_head,
+                max_position_embeddings=config.rope_max_seq_len,
+                alpha=config.rope_alpha,
+            )
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
+            wpe = None if self.rope is not None else nn.Embedding(
+                config.block_size, config.n_embd
+            ),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            decoder = nn.ModuleList([DecoderLayer(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -155,9 +180,10 @@ class GPT(nn.Module):
         params are actually used as weights in the final layer, so we include them.
         """
         n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
+        if non_embedding and self.transformer.wpe is not None:
             n_params -= self.transformer.wpe.weight.numel()
         return n_params
+        
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -167,18 +193,25 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
-        device = idx.device
-        b, t = idx.size()
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+    @property
+    def context_limit(self):
+        return self.config.rope_max_seq_len or self.config.block_size
 
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
-        for block in self.transformer.h:
-            x = block(x)
+    def forward(self, idx, targets=None):
+        t = idx.size(1)
+        if t > self.context_limit:
+            raise ValueError(
+                f"Sequence length {t} exceeds context limit {self.context_limit}"
+            )
+
+        x = self.transformer.wte(idx)
+        if self.transformer.wpe is not None:
+            pos = torch.arange(t, device=idx.device)
+            x = x + self.transformer.wpe(pos)
+        x = self.transformer.drop(x)
+
+        for decoder_layer in self.transformer.decoder:
+            x = decoder_layer(x, rope=self.rope)
         x = self.transformer.ln_f(x)
 
         if targets is not None:
@@ -198,10 +231,14 @@ class GPT(nn.Module):
         # but want to use a smaller block size for some smaller, simpler model
         assert block_size <= self.config.block_size
         self.config.block_size = block_size
-        self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[:block_size])
-        for block in self.transformer.h:
-            if hasattr(block.attn, 'bias'):
-                block.attn.bias = block.attn.bias[:,:,:block_size,:block_size]
+        if self.transformer.wpe is not None:
+            self.transformer.wpe.weight = nn.Parameter(
+                self.transformer.wpe.weight[:block_size]
+            )
+        for decoder_layer in self.transformer.decoder:
+            if hasattr(decoder_layer.attn, 'bias'):
+                decoder_layer.attn.bias = decoder_layer.attn.bias[:,:,:block_size,:block_size]
+                
 
     @classmethod
     def from_pretrained(cls, model_type, override_args=None):
@@ -311,7 +348,8 @@ class GPT(nn.Module):
         """
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            idx_cond = idx[:, -self.context_limit:]
+            # idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
