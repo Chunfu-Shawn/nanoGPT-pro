@@ -3,6 +3,8 @@
 # directory
 log/
 out/
+.vscode/
+__pycache__
 
 # data
 data/**/*train.bin

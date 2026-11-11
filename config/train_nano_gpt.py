@@ -1,7 +1,7 @@
 # Small TinyStories pretraining run on CPU.
 out_dir = "out"
-eval_interval = 10000
-eval_iters = 500
+eval_interval = 2000
+eval_iters = 1000
 log_interval = 200
 tensorboard_log = True
 always_save_checkpoint = False
@@ -20,7 +20,7 @@ rope_max_seq_len = 1024
 rope_alpha = 1.0
 
 # training
-init_from="resume"
+init_from="scratch"
 learning_rate = 1e-3
 max_iters = 500000
 lr_decay_iters = 400000
