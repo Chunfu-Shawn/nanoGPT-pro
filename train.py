@@ -17,7 +17,6 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 """
 
 import atexit
-import csv
 import json
 import os
 import time
@@ -36,6 +35,8 @@ from torch.distributed import init_process_group, destroy_process_group, reduce
 
 from generator import generate_text
 from model import GPTConfig, GPT
+from logger import LossLogger
+from dataloader import DataLoaderLite
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -46,13 +47,9 @@ eval_interval = 2000
 log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
-always_save_checkpoint = True # if True, always save a checkpoint after each eval
+always_save_checkpoint = False # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
-# metrics logging
 tensorboard_log = False
-wandb_log = False # disabled by default
-wandb_project = 'owt'
-wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # generation previews
 generation_interval = 10000
 generation_file = ''
@@ -154,61 +151,6 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 # note: float16 data type will automatically use a GradScaler
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-
-class DataLoaderLite:
-    """Read consecutive next-token batches from a flat uint16 token file."""
-
-    def __init__(self, filename, batch_size, block_size, device, *, rank=0, world_size=1):
-        self.tokens = np.memmap(filename, dtype=np.uint16, mode="r")
-        self.batch_shape = (batch_size, block_size)
-        self.batch_tokens = batch_size * block_size
-        self.rank_offset = rank * self.batch_tokens
-        self.stride = world_size * self.batch_tokens
-        self.batches_per_epoch = (len(self.tokens) - 1) // self.stride
-        if self.batches_per_epoch < 1:
-            raise ValueError(f"{filename} needs at least {self.stride + 1:,} tokens for a full batch")
-        self.device = torch.device(device)
-        self.layout = (len(self.tokens), self.batch_shape, world_size)
-        self.reset()
-
-    def reset(self):
-        self.batches_read = 0
-
-    def next_batch(self):
-        batch_index = self.batches_read % self.batches_per_epoch
-        start = batch_index * self.stride + self.rank_offset
-        tokens = self._read_tokens(start, start + self.batch_tokens + 1)
-        self.batches_read += 1
-        return tokens[:-1].view(self.batch_shape), tokens[1:].view(self.batch_shape)
-
-    def _read_tokens(self, start, end):
-        tokens = torch.from_numpy(self.tokens[start:end].astype(np.int64))
-        use_cuda = self.device.type == "cuda"
-        if use_cuda:
-            tokens = tokens.pin_memory()
-        return tokens.to(self.device, non_blocking=use_cuda)
-
-    def evaluation_batches(self, limit):
-        self.reset()
-        count = self.batches_per_epoch if limit is None else min(limit, self.batches_per_epoch)
-        for _ in range(count):
-            yield self.next_batch()
-
-        if limit is None:
-            block_size = self.batch_shape[1]
-            for start in range(count * self.stride, len(self.tokens) - 1, block_size):
-                tokens = self._read_tokens(start, start + block_size + 1)
-                yield tokens[:-1].unsqueeze(0), tokens[1:].unsqueeze(0)
-
-    def state_dict(self):
-        return {"layout": self.layout, "batches_read": self.batches_read}
-
-    def load_state_dict(self, state):
-        if state["layout"] != self.layout:
-            return False
-        self.batches_read = state["batches_read"]
-        return True
-
 
 data_dir = os.path.join("data", dataset)
 train_loader = DataLoaderLite(
@@ -364,53 +306,6 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
     return min_lr + coeff * (learning_rate - min_lr)
 
-class LossLogger:
-    def __init__(self, out_dir, run_name, tensorboard_log, resume_step=None, resume_epoch=0):
-        self.directory = os.path.join(out_dir, "metrics", run_name)
-        os.makedirs(self.directory, exist_ok=resume_step is not None)
-        for interval in ("step", "epoch"):
-            path = self._csv_path(interval)
-            with NamedTemporaryFile(mode="w", dir=self.directory, newline="", delete=False) as handle:
-                temporary_path = handle.name
-                writer = csv.writer(handle)
-                writer.writerow(("step", "epoch", "train_loss", "val_loss"))
-                if resume_step is not None and os.path.exists(path):
-                    with open(path, newline="") as source:
-                        for row in csv.DictReader(source):
-                            if int(row["step"]) <= resume_step:
-                                writer.writerow((row["step"], row["epoch"], row["train_loss"], row["val_loss"]))
-            os.replace(temporary_path, path)
-        print(f"Loss CSV files: {self.directory}")
-
-        self.writers = {}
-        if tensorboard_log:
-            try:
-                from torch.utils.tensorboard import SummaryWriter
-            except ImportError:
-                print("TensorBoard is unavailable. Install it with python -m pip install tensorboard.")
-            else:
-                log_dir = os.path.join(out_dir, "tensorboard", run_name)
-                for interval, index in (("step", resume_step), ("epoch", resume_epoch)):
-                    purge_step = index + 1 if resume_step is not None else None
-                    writer = SummaryWriter(os.path.join(log_dir, interval), purge_step=purge_step, flush_secs=5)
-                    self.writers[interval] = writer
-                    atexit.register(writer.close)
-                print(f"TensorBoard events: {log_dir}")
-
-    def _csv_path(self, interval):
-        return os.path.join(self.directory, f"{interval}s.csv")
-
-    def record(self, interval, step, epoch, train_loss=None, val_loss=None):
-        with open(self._csv_path(interval), "a", newline="") as handle:
-            csv.writer(handle).writerow((step, epoch, train_loss, val_loss))
-        if interval in self.writers:
-            writer = self.writers[interval]
-            index = step if interval == "step" else epoch
-            if train_loss is not None:
-                writer.add_scalar(f"{interval}/train_loss", train_loss, index)
-            if val_loss is not None:
-                writer.add_scalar(f"{interval}/val_loss", val_loss, index)
-
 raw_model = model.module if ddp else model
 batches_per_epoch = train_loader.batches_per_epoch
 if master_process:
@@ -419,9 +314,6 @@ if master_process:
         resume_step=iter_num if init_from == "resume" else None,
         resume_epoch=train_loader.batches_read // batches_per_epoch,
     )
-    if wandb_log:
-        import wandb
-        wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
     if iter_num == 0 or eval_only:
         val_loss = estimate_loss(raw_model, val_loader, eval_iters)
@@ -506,9 +398,6 @@ while not eval_only and iter_num < max_iters:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 save_checkpoint = True
-            if wandb_log:
-                wandb.log({"iter": iter_num, "train/loss": step_loss, "val/loss": val_loss,
-                           "lr": lr, "mfu": running_mfu * 100})
         loss_logger.record("step", iter_num, epoch, step_loss, val_loss)
 
         if batch_in_epoch == 0:

@@ -4,7 +4,7 @@ eval_interval = 10000
 eval_iters = 500
 log_interval = 200
 tensorboard_log = True
-always_save_checkpoint = True
+always_save_checkpoint = False
 
 dataset = "fineweb-edu" # "tinystories"
 gradient_accumulation_steps = 2
