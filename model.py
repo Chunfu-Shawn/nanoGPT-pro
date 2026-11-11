@@ -118,6 +118,7 @@ class DecoderLayer(nn.Module):
 
 @dataclass
 class GPTConfig:
+    model_name: str = 'nanoGPT-pro'
     block_size: int = 1024
     vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     n_layer: int = 12
@@ -333,29 +334,21 @@ class GPT(nn.Module):
         return mfu
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, *,
+                 vocab_size=None, sample_rng=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
+        sample_device = idx.device if sample_rng is None else sample_rng.device
         for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx[:, -self.context_limit:]
-            # idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
-            # forward the model to get the logits for the index in the sequence
-            logits = self(idx_cond, last_token_only=True)
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
-            # optionally crop the logits to only the top k options
+            context = idx[:, -self.context_limit:]
+            logits = self(context, last_token_only=True)[:, -1, :vocab_size] / temperature
             if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
-            # apply softmax to convert logits to (normalized) probabilities
-            probs = F.softmax(logits, dim=-1)
-            # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1)
-            # append sampled index to the running sequence and continue
-            idx = torch.cat((idx, idx_next), dim=1)
-
+                top_logits, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits = logits.masked_fill(logits < top_logits[:, -1:], float("-inf"))
+            probs = logits.softmax(dim=-1).to(sample_device)
+            next_token = torch.multinomial(probs, 1, generator=sample_rng).to(idx.device)
+            idx = torch.cat((idx, next_token), dim=1)
         return idx

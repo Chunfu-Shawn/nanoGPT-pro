@@ -18,25 +18,30 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 
 import atexit
 import csv
+import json
 import os
 import time
 import math
 import pickle
+import re
 from contextlib import nullcontext
-from tempfile import mkdtemp
+from tempfile import NamedTemporaryFile
 
 import numpy as np
 import torch
+from filelock import FileLock
 from torch.nn import functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group, reduce
 
+from generator import generate_text
 from model import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
+resume_checkpoint = ''
 eval_interval = 2000
 log_interval = 1
 eval_iters = 200
@@ -48,12 +53,19 @@ tensorboard_log = False
 wandb_log = False # disabled by default
 wandb_project = 'owt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
+# generation previews
+generation_interval = 10000
+generation_file = ''
+generation_prompt = 'Once upon a time'
+generation_num_samples = 4
+generation_max_new_tokens = 64
 # data
 dataset = 'openwebtext'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
 # model
+model_name="nanoGPT-pro"
 n_layer = 12
 n_head = 12
 n_embd = 768
@@ -70,8 +82,8 @@ beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
-warmup_iters = 2000 # how many steps to warm up for
-lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
+warmup_ratio = 0.2 # how many steps to warm up for
+lr_decay_iters = 500000 # should be ~= max_iters per Chinchilla
 min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -83,6 +95,25 @@ compile = True # use PyTorch 2.0 to compile the model to be faster
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
+if not math.isfinite(learning_rate) or learning_rate <= 0 or not 0 <= warmup_ratio < 1:
+    raise ValueError("learning_rate must be positive and warmup_ratio must be in [0, 1)")
+
+
+def filename_part(value):
+    part = re.sub(r"[^\w.-]+", "_", value).strip("._")
+    if not part:
+        raise ValueError("Model and dataset names must contain filename characters")
+    return part
+
+
+run_name = (
+    f"{filename_part(model_name)}_{filename_part(dataset)}_lr{learning_rate}_wr{warmup_ratio}"
+    f"_batch{batch_size * gradient_accumulation_steps}x{block_size}"
+)
+checkpoint_dir = os.path.join(out_dir, "checkpoints")
+ckpt_path = os.path.join(checkpoint_dir, f"{run_name}.pt")
+warmup_iters = int(warmup_ratio * max_iters)
+print(f"Training run: {run_name}")
 # -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
@@ -110,7 +141,12 @@ tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * bl
 print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
 if master_process:
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    run_lock = FileLock(os.path.join(checkpoint_dir, f"{run_name}.lock"), timeout=0)
+    run_lock.acquire()
+    atexit.register(run_lock.release)
+    if init_from != "resume" and os.path.exists(ckpt_path):
+        raise FileExistsError(f"Checkpoint exists: {ckpt_path}. Use --init_from=resume or another out_dir.")
 torch.manual_seed(1337 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
@@ -190,6 +226,7 @@ epoch_batches = 0
 
 # attempt to derive vocab_size from the dataset
 meta_path = os.path.join(data_dir, 'meta.pkl')
+meta = None
 meta_vocab_size = None
 if os.path.exists(meta_path):
     with open(meta_path, 'rb') as f:
@@ -198,7 +235,7 @@ if os.path.exists(meta_path):
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
 # model init
-model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
+model_args = dict(model_name=model_name, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   rope_max_seq_len=rope_max_seq_len, rope_alpha=rope_alpha,
                   bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
 if init_from == 'scratch':
@@ -213,8 +250,21 @@ if init_from == 'scratch':
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, f'ckpt.{dataset}.pt')
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    load_path = resume_checkpoint or ckpt_path
+    if not resume_checkpoint and not os.path.exists(load_path):
+        legacy_paths = (
+            os.path.join(out_dir, f"ckpt.{learning_rate}.{dataset}.pt"),
+            os.path.join(out_dir, f"ckpt.{dataset}.pt"),
+            os.path.join(out_dir, "ckpt.pt"),
+        )
+        load_path = next((path for path in legacy_paths if os.path.exists(path)), load_path)
+    print(f"Loading checkpoint: {load_path}")
+    checkpoint = torch.load(load_path, map_location="cpu")
+    saved_config = checkpoint.get("config", {})
+    saved_warmup = saved_config.get("warmup_iters")
+    if saved_warmup is None:
+        saved_warmup = int(saved_config.get("warmup_ratio", warmup_ratio) * saved_config.get("max_iters", max_iters))
+    warmup_iters = checkpoint.get("warmup_iters", saved_warmup)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
@@ -262,7 +312,16 @@ if init_from == 'resume':
             epoch_loss_sum, epoch_batches = checkpoint.get("epoch_metrics", (0.0, 0))
         elif master_process:
             print("Data loader layout changed. Restarting the data pass from the beginning.")
+resume_rng = None
+if init_from == 'resume':
+    if "scaler" in checkpoint:
+        scaler.load_state_dict(checkpoint["scaler"])
+    if not ddp:
+        resume_rng = checkpoint.get("rng_state")
 checkpoint = None # free up memory
+config["run_name"] = run_name
+config["warmup_iters"] = warmup_iters
+
 
 # compile the model
 if compile:
@@ -306,26 +365,36 @@ def get_lr(it):
     return min_lr + coeff * (learning_rate - min_lr)
 
 class LossLogger:
-    def __init__(self, out_dir, dataset, tensorboard_log):
-        metrics_dir = os.path.join(out_dir, "metrics")
-        os.makedirs(metrics_dir, exist_ok=True)
-        self.directory = mkdtemp(prefix=f"{dataset}-", dir=metrics_dir)
+    def __init__(self, out_dir, run_name, tensorboard_log, resume_step=None, resume_epoch=0):
+        self.directory = os.path.join(out_dir, "metrics", run_name)
+        os.makedirs(self.directory, exist_ok=resume_step is not None)
         for interval in ("step", "epoch"):
-            with open(self._csv_path(interval), "w", newline="") as handle:
-                csv.writer(handle).writerow(("step", "epoch", "train_loss", "val_loss"))
+            path = self._csv_path(interval)
+            with NamedTemporaryFile(mode="w", dir=self.directory, newline="", delete=False) as handle:
+                temporary_path = handle.name
+                writer = csv.writer(handle)
+                writer.writerow(("step", "epoch", "train_loss", "val_loss"))
+                if resume_step is not None and os.path.exists(path):
+                    with open(path, newline="") as source:
+                        for row in csv.DictReader(source):
+                            if int(row["step"]) <= resume_step:
+                                writer.writerow((row["step"], row["epoch"], row["train_loss"], row["val_loss"]))
+            os.replace(temporary_path, path)
         print(f"Loss CSV files: {self.directory}")
 
-        self.writer = None
+        self.writers = {}
         if tensorboard_log:
             try:
                 from torch.utils.tensorboard import SummaryWriter
             except ImportError:
                 print("TensorBoard is unavailable. Install it with python -m pip install tensorboard.")
             else:
-                run = os.path.basename(self.directory)
-                log_dir = os.path.join(out_dir, "tensorboard", run)
-                self.writer = SummaryWriter(log_dir, flush_secs=5)
-                atexit.register(self.writer.close)
+                log_dir = os.path.join(out_dir, "tensorboard", run_name)
+                for interval, index in (("step", resume_step), ("epoch", resume_epoch)):
+                    purge_step = index + 1 if resume_step is not None else None
+                    writer = SummaryWriter(os.path.join(log_dir, interval), purge_step=purge_step, flush_secs=5)
+                    self.writers[interval] = writer
+                    atexit.register(writer.close)
                 print(f"TensorBoard events: {log_dir}")
 
     def _csv_path(self, interval):
@@ -334,28 +403,40 @@ class LossLogger:
     def record(self, interval, step, epoch, train_loss=None, val_loss=None):
         with open(self._csv_path(interval), "a", newline="") as handle:
             csv.writer(handle).writerow((step, epoch, train_loss, val_loss))
-        if self.writer is not None:
+        if interval in self.writers:
+            writer = self.writers[interval]
             index = step if interval == "step" else epoch
             if train_loss is not None:
-                self.writer.add_scalar(f"{interval}/train_loss", train_loss, index)
+                writer.add_scalar(f"{interval}/train_loss", train_loss, index)
             if val_loss is not None:
-                self.writer.add_scalar(f"{interval}/val_loss", val_loss, index)
-
+                writer.add_scalar(f"{interval}/val_loss", val_loss, index)
 
 raw_model = model.module if ddp else model
 batches_per_epoch = train_loader.batches_per_epoch
 if master_process:
-    loss_logger = LossLogger(out_dir, dataset, tensorboard_log)
+    loss_logger = LossLogger(
+        out_dir, run_name, tensorboard_log,
+        resume_step=iter_num if init_from == "resume" else None,
+        resume_epoch=train_loader.batches_read // batches_per_epoch,
+    )
     if wandb_log:
         import wandb
         wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
     if iter_num == 0 or eval_only:
         val_loss = estimate_loss(raw_model, val_loader, eval_iters)
-        loss_logger.record("step", iter_num, train_loader.batches_read // batches_per_epoch,
-                           val_loss=val_loss)
+        if init_from != "resume":
+            loss_logger.record("step", iter_num, train_loader.batches_read // batches_per_epoch,
+                               val_loss=val_loss)
         print(f"step {iter_num}: val loss {val_loss:.4f}")
         best_val_loss = min(best_val_loss, val_loss)
+
+if resume_rng is not None:
+    torch.set_rng_state(resume_rng["cpu"])
+    if device_type == "cuda" and "cuda" in resume_rng:
+        torch.cuda.set_rng_state(resume_rng["cuda"], device)
+    if device == "mps" and "mps" in resume_rng:
+        torch.mps.set_rng_state(resume_rng["mps"])
 
 t0 = time.time()
 local_iter_num = 0
@@ -404,7 +485,17 @@ while not eval_only and iter_num < max_iters:
             if local_iter_num > 5:
                 mfu = raw_model.estimate_mfu(batch_size * micro_steps, dt)
                 running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-            print(f"iter {iter_num}: loss {step_loss:.4f}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%")
+            
+            # evaluate operating rate
+            tokens_processed = train_loader.batch_shape[0] * train_loader.batch_shape[1] * micro_steps * ddp_world_size
+            tokens_per_sec = tokens_processed / dt
+            print(f"iter {iter_num}: loss {step_loss:.4f}, lr {lr:.4e}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%, tokens/s {tokens_per_sec:.2f}")
+            
+            # evaluate memory stress
+            if torch.backends.mps.is_available():
+                allocated = torch.mps.current_allocated_memory() / 1024**3
+                driver = torch.mps.driver_allocated_memory() / 1024**3
+                print(f"MPS tensor memory: {allocated:.2f} GiB, MPS driver memory: {driver:.2f} GiB")
 
         eval_step = iter_num % eval_interval == 0 or iter_num == max_iters
         val_loss = None
@@ -439,10 +530,49 @@ while not eval_only and iter_num < max_iters:
                 "iter_num": iter_num,
                 "best_val_loss": best_val_loss,
                 "config": config,
+                "run_name": run_name,
+                "warmup_iters": warmup_iters,
+                "scaler": scaler.state_dict(),
             }
-            ckpt_path = os.path.join(out_dir, f"ckpt.{dataset}.pt")
+            if not ddp:
+                checkpoint["rng_state"] = {"cpu": torch.get_rng_state()}
+                if device_type == "cuda":
+                    checkpoint["rng_state"]["cuda"] = torch.cuda.get_rng_state(device)
+                if device == "mps":
+                    checkpoint["rng_state"]["mps"] = torch.mps.get_rng_state()
             print(f"saving checkpoint to {ckpt_path}")
-            torch.save(checkpoint, ckpt_path)
+            with NamedTemporaryFile(dir=checkpoint_dir, suffix=".pt", delete=False) as handle:
+                temporary_path = handle.name
+            try:
+                torch.save(checkpoint, temporary_path)
+                os.replace(temporary_path, ckpt_path)
+            finally:
+                if os.path.exists(temporary_path):
+                    os.remove(temporary_path)
+
+        if generation_interval > 0 and iter_num % generation_interval == 0:
+            generation_path = generation_file or os.path.join(out_dir, f"generations.{run_name}.jsonl")
+            generation_model = unoptimized_model if compile else raw_model
+            try:
+                with ctx:
+                    completions = generate_text(
+                        generation_model, generation_prompt, meta=meta,
+                        num_samples=generation_num_samples, max_new_tokens=generation_max_new_tokens,
+                    )
+                record = {
+                    "run": os.path.basename(loss_logger.directory),
+                    "step": iter_num,
+                    "epoch": epoch,
+                    "prompt": generation_prompt,
+                    "completions": completions,
+                }
+                os.makedirs(os.path.dirname(generation_path) or ".", exist_ok=True)
+                with open(generation_path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            except (ImportError, OSError, ValueError) as exc:
+                print(f"step {iter_num}: text generation preview failed: {exc}")
+            else:
+                print(f"step {iter_num}: saved text generation preview to {generation_path}")
 
 if ddp:
     destroy_process_group()
