@@ -1,4 +1,0 @@
-/Users/chunfu/Desktop/Learning/nanoGPT-pro/train.py:303: UserWarning: torch.cuda.amp.GradScaler is enabled, but CUDA is not available.  Disabling.
-  scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
-/opt/miniconda3/envs/gpt/lib/python3.11/multiprocessing/resource_tracker.py:224: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
-  warnings.warn('resource_tracker: There appear to be %d '

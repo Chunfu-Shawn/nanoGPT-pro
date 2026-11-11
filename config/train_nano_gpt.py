@@ -20,7 +20,7 @@ rope_max_seq_len = 1024
 rope_alpha = 1.0
 
 # training
-init_from="scratch"
+init_from="resume"
 learning_rate = 1e-3
 max_iters = 500000
 lr_decay_iters = 400000

@@ -30,9 +30,7 @@ def generate_text(model, prompt, *, meta=None, num_samples=4, max_new_tokens=64,
 
     device = next(model.parameters()).device
     tokens = torch.tensor(prompt_ids, dtype=torch.long, device=device).repeat(num_samples, 1)
-    # CPU/MPS sampling also works on devices without a dedicated torch.Generator.
-    sample_device = device if device.type == "cuda" else "mps"
-    sample_rng = torch.Generator(device=sample_device).manual_seed(seed)
+    sample_rng = torch.Generator(device=device).manual_seed(seed)
     was_training = model.training
     model.eval()
     try:
